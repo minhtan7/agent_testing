@@ -17,4 +17,5 @@ langchain_postgres
 python-dotenv
 pgvector==0.2.3
 psycopg-binary
+docling>=0.1.0
 pinecone>=6.0.0
