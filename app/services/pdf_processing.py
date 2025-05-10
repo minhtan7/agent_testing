@@ -22,12 +22,10 @@ except Exception as e:
     print(f"Warning: Could not use docling processor. Error: {str(e)}")
     print("Falling back to standard PDF processing.")
 
-# Default to not using docling due to SSL issues
-# Can be enabled via environment variable
-ENABLE_DOCLING = os.environ.get('ENABLE_DOCLING', 'False').lower() in ('true', '1', 't')
-if not ENABLE_DOCLING and DOCLING_AVAILABLE:
-    print("NOTE: Docling is available but disabled by default due to SSL certificate issues.")
-    print("Set ENABLE_DOCLING=True to enable it.")
+# Default to using docling for testing purposes
+# Can be disabled via environment variable if needed
+ENABLE_DOCLING = True  # Set to True by default for testing
+print("NOTE: Docling is enabled by default for testing")
 
 
 def process_pdf(file: UploadFile, use_docling: bool = False) -> Dict[str, Any]:
