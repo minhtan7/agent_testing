@@ -18,6 +18,7 @@ from app.models.enums import ContentTypeEnum, UploadStatusEnum, StorageProvider
 from app.services.pdf_processing import process_pdf
 from app.services.enhanced_study_plan import generate_enhanced_study_plan
 from app.vectorstore.pinecone_ops import upsert_text_chunks
+import glob
 
 router = APIRouter()
 
@@ -143,16 +144,20 @@ async def upload_enhanced_pdf(
         try:
             # Extract text chunks to pass to the generator (to avoid double processing)
             text_chunks = [item for item in result["items"] if item.get("type") == "text"]
-            
+            print(f'text_chunks: {text_chunks}')
             # Generate the enhanced study plan and pass the already processed text chunks
-            study_plan_id = generate_enhanced_study_plan(
-                document_id=new_document.id,
-                user_id=user.id,
-                familiarity=familiarity,
-                goal=goal,
-                text_chunks=text_chunks,
-                db=db
-            )
+            try:
+                study_plan_id = generate_enhanced_study_plan(
+                    document_id=new_document.id,
+                    user_id=user.id,
+                    familiarity=familiarity,
+                    goal=goal,
+                    text_chunks=text_chunks,
+                    db=db
+                )
+            except Exception as e:
+                print(f"Error generating enhanced study plan: {str(e)}")
+                study_plan_id = None
             
             return {
                 "document_id": str(new_document.id),
@@ -177,3 +182,57 @@ async def upload_enhanced_pdf(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={"error": f"Failed to process file: {str(e)}"},
         )
+
+
+@router.get("/text-chunks/{document_id}")
+def get_text_chunks(document_id: str, db: Session = Depends(get_db)):
+    """Get all text chunks from a specific document.
+    
+    Args:
+        document_id: The document ID to retrieve chunks for
+        
+    Returns:
+        List of text chunks with content and metadata
+    """
+    # Query the database for text chunks related to this document
+    try:
+        # Find the document
+        document = db.query(Document).filter(Document.id == document_id).first()
+        if not document:
+            raise HTTPException(status_code=404, detail=f"Document with ID {document_id} not found")
+        
+        # Get all text chunks for this document
+        document_chunks = db.query(DocumentChunk).filter(
+            DocumentChunk.document_id == document_id,
+            DocumentChunk.content_type == ContentTypeEnum.text  # Only get text chunks
+        ).order_by(DocumentChunk.page_number, DocumentChunk.chunk_index).all()
+        
+        if not document_chunks:
+            return {
+                "document_id": document_id,
+                "document_name": document.title,
+                "total_chunks": 0,
+                "chunks": []
+            }
+        
+        # Format response
+        chunks = []
+        for chunk in document_chunks:
+            content = chunk.text_content or ""
+            chunks.append({
+                "id": str(chunk.id),
+                "chunk_index": chunk.chunk_index,
+                "page": chunk.page_number,
+                "content": content[:200] + "..." if len(content) > 200 else content,
+                "length": len(content) if content else 0,
+                "token_count": chunk.token_count
+            })
+        
+        return {
+            "document_id": document_id,
+            "document_name": document.title,
+            "total_chunks": len(chunks),
+            "chunks": chunks
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving document chunks: {str(e)}")

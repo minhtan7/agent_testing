@@ -18,6 +18,15 @@ import docling_core
 import docling_parse
 from app.models.upload import FileID
 
+# Import our custom helper for direct text processing
+try:
+    from app.utils.direct_text_processor import process_text_elements_directly
+except ImportError:
+    # Define fallback if import fails
+    def process_text_elements_directly(document, base_dir, file_location, items):
+        print("Direct text processor not available")
+        return 0
+
 def create_directories(base_dir: str) -> None:
     """
     Create necessary directories for storing processed PDF content.
@@ -60,51 +69,280 @@ def process_pdf_with_docling(file: UploadFile) -> Dict[str, Any]:
     metadata_path = os.path.join(base_dir, "metadata", f"{os.path.basename(file_location)}_metadata.json")
     
     try:
-        # Use docling command-line to process the PDF
-        print(f"Processing PDF with docling: {file_location}")
+        # Use docling PYTHON API directly to process the PDF
+        print(f"Processing PDF with docling Python API: {file_location}")
         
         # Create a directory for docling output
         docling_output_dir = os.path.join(base_dir, "docling_output")
         os.makedirs(docling_output_dir, exist_ok=True)
         
-        # Check if we should skip docling entirely based on previous failures or environment vars
-        USE_DOCLING = os.environ.get('USE_DOCLING', 'True').lower() in ('true', '1', 't')
+        # Create a debug directory
+        debug_dir = os.path.join(base_dir, "debug")
+        os.makedirs(debug_dir, exist_ok=True)
         
-        if not USE_DOCLING:
-            print("Skipping docling processing due to environment settings")
-            raise RuntimeError("Docling processing skipped by configuration")
+        # Always use docling for testing
+        print("NOTE: Docling is enabled by default for testing")
         
-        # Use subprocess to run docling CLI
-        import subprocess
-        docling_json_path = os.path.join(docling_output_dir, "output_data.json")
-        docling_script_path = os.path.join(os.path.dirname(__file__), 'docling_script.py')
+        # Use docling's Python API for direct processing
+        from pathlib import Path
+        from docling.document_converter import DocumentConverter
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
         
-        # Try to run docling CLI with JSON output format
+        # Convert the file path to a Path object
+        pdf_path = Path(file_location)
+        output_path = Path(docling_output_dir)
+        
         try:
-            # Set environment variables to handle SSL certificate issues
-            env = os.environ.copy()
-            # Run our custom script that disables SSL verification
-            subprocess.run([
-                "python", 
-                docling_script_path,
-                file_location, 
-                "--to", "json", 
-                "--output", docling_json_path,
-                "--device", "cpu"  # Force CPU to avoid CUDA/MPS issues
-            ], check=True, env=env, timeout=60)  # Add timeout to prevent hanging
+            # Try a simpler approach with the converter
+            converter = DocumentConverter()
             
-            # Make sure the output file exists
-            if not os.path.isfile(docling_json_path):
-                print(f"Docling output file not found at {docling_json_path}")
-                raise FileNotFoundError(f"Docling did not create the expected output file")
-        except (subprocess.SubprocessError, subprocess.TimeoutExpired) as e:
-            print(f"Docling CLI error: {str(e)}")
-            # If docling fails, we'll fall back to traditional processing
-            raise RuntimeError(f"Docling CLI processing failed: {str(e)}")
-        
-        # Open and parse the JSON output from docling
-        with open(docling_json_path, 'r') as f:
-            docling_data = json.load(f)
+            # Set up basic options - OCR off for speed
+            pipeline = PdfPipelineOptions(do_ocr=False)
+            
+            # Create conversion result object
+            doc = converter.convert(pdf_path)
+            
+            # Save the output to a JSON file
+            json_path = output_path / f"{pdf_path.stem}.json"
+            docling_json_path = os.path.join(debug_dir, f"docling_raw.json")
+            
+            # Inspect the return type and structure to understand what we're getting
+            print(f"Docling returned object of type: {type(doc)}")
+            print(f"Available attributes/methods: {dir(doc)}")
+            
+            # Try to save the raw docling output as JSON if possible
+            try:
+                if hasattr(doc, 'model_dump_json'):
+                    # For Pydantic models
+                    with open(docling_json_path, 'w', encoding='utf-8') as f:
+                        f.write(doc.model_dump_json(indent=2))
+                    print(f"Saved raw docling output to {docling_json_path}")
+                elif hasattr(doc, 'json'):
+                    # For objects with json method
+                    with open(docling_json_path, 'w', encoding='utf-8') as f:
+                        f.write(doc.json())
+                    print(f"Saved raw docling output to {docling_json_path}")
+            except Exception as json_err:
+                print(f"Could not save raw docling output: {str(json_err)}")
+            
+            # Extract document content for processing
+            docling_data = {}
+            
+            # Debug what document properties are available
+            if hasattr(doc, 'document'):
+                document = doc.document
+                print(f"Document object type: {type(document)}")
+                print(f"Document properties: {dir(document)}")
+                
+                # Save raw document text
+                raw_text_path = os.path.join(debug_dir, "raw_document_text.txt")
+                try:
+                    if hasattr(document, 'text'):
+                        with open(raw_text_path, 'w', encoding='utf-8') as f:
+                            f.write(document.text)
+                        print(f"Saved raw document text to {raw_text_path}")
+                except Exception as e:
+                    print(f"Could not save raw document text: {str(e)}")
+                    
+                # Extract and process pages - this is where we'll get our text from
+                if hasattr(document, 'pages') and document.pages:
+                    print(f"Document has {len(document.pages)} pages")
+                    
+                    # Process each page to extract text
+                    for page_idx, page in enumerate(document.pages):
+                        print(f"Processing page {page_idx+1}")
+                        page_text = ""
+                        
+                        # Try to extract text using different methods
+                        # Method 1: Use document's export_to_text method for the page
+                        try:
+                            if hasattr(document, 'export_to_text'):
+                                page_text = document.export_to_text(page_range=(page_idx, page_idx+1))
+                                print(f"Got text from export_to_text: {len(page_text)} chars")
+                        except Exception as e:
+                            print(f"Error using export_to_text: {str(e)}")
+                        
+                        # Method 2: Check if page has texts attribute
+                        if not page_text and hasattr(page, 'texts') and page.texts:
+                            try:
+                                page_text = '\n'.join([t.text for t in page.texts if hasattr(t, 'text') and t.text])
+                                print(f"Got text from page.texts: {len(page_text)} chars")
+                            except Exception as e:
+                                print(f"Error extracting from page.texts: {str(e)}")
+                        
+                        # Method 3: Try to access text elements if available
+                        if hasattr(page, 'text_elements') and page.text_elements:
+                            # Extract text from each text element on the page
+                            for elem_idx, text_elem in enumerate(page.text_elements):
+                                if hasattr(text_elem, 'text') and text_elem.text and text_elem.text.strip():
+                                    # Save this text to a file
+                                    text_file_name = f"{base_dir}/text/element_{elem_idx:03d}_p{page_idx}.txt"
+                                    with open(text_file_name, 'w', encoding='utf-8') as f:
+                                        f.write(text_elem.text)
+                                    
+                                    # Add to items list
+                                    items.append({
+                                        "page": page_idx,
+                                        "type": "text",
+                                        "text": text_elem.text,
+                                        "path": text_file_name
+                                    })
+                        
+                        # Method 4: Check if document.texts contains elements for this page
+                        if not items and hasattr(document, 'texts'):
+                            try:
+                                page_texts = [t for t in document.texts if hasattr(t, 'page_number') and t.page_number == page_idx]
+                                for t_idx, text in enumerate(page_texts):
+                                    if hasattr(text, 'text') and text.text and text.text.strip():
+                                        text_file_name = f"{base_dir}/text/doc_text_{t_idx:03d}_p{page_idx}.txt"
+                                        with open(text_file_name, 'w', encoding='utf-8') as f:
+                                            f.write(text.text)
+                                        
+                                        # Add to items list
+                                        items.append({
+                                            "page": page_idx,
+                                            "type": "text",
+                                            "text": text.text,
+                                            "path": text_file_name
+                                        })
+                                print(f"Got {len(page_texts)} text elements from document.texts for page {page_idx+1}")
+                            except Exception as e:
+                                print(f"Error extracting from document.texts: {str(e)}")
+                        
+                        # If we have page text (from any method), chunk it
+                        if page_text:
+                            chunks = text_splitter.split_text(page_text)
+                            for chunk_idx, chunk in enumerate(chunks):
+                                text_file_name = f"{base_dir}/text/page_{page_idx:03d}_chunk_{chunk_idx:03d}.txt"
+                                with open(text_file_name, 'w', encoding='utf-8') as f:
+                                    f.write(chunk)
+                                
+                                # Add to items list
+                                items.append({
+                                    "page": page_idx,
+                                    "type": "text",
+                                    "text": chunk,
+                                    "path": text_file_name
+                                })
+                                
+                # Try methods available from full document object
+                # Method 5: Try export_to_text method for the whole document
+                try:
+                    if hasattr(document, 'export_to_text'):
+                        full_text = document.export_to_text()
+                        if full_text and full_text.strip():
+                            # Save the full document text
+                            full_text_path = os.path.join(base_dir, "text", "full_document.txt")
+                            with open(full_text_path, 'w', encoding='utf-8') as f:
+                                f.write(full_text)
+                            print(f"Saved full document text: {len(full_text)} chars")
+                            
+                            # Split into chunks
+                            chunks = text_splitter.split_text(full_text)
+                            for chunk_idx, chunk in enumerate(chunks):
+                                text_file_name = f"{base_dir}/text/document_chunk_{chunk_idx:03d}.txt"
+                                with open(text_file_name, 'w', encoding='utf-8') as f:
+                                    f.write(chunk)
+                                
+                                # Add to items list
+                                items.append({
+                                    "page": 0,  # Assign to first page as we don't know the page number
+                                    "type": "text",
+                                    "text": chunk,
+                                    "path": text_file_name
+                                })
+                except Exception as e:
+                    print(f"Error using document.export_to_text(): {str(e)}")
+                
+                # Method 6: Try export_to_markdown method
+                if not items:
+                    try:
+                        if hasattr(document, 'export_to_markdown'):
+                            markdown_text = document.export_to_markdown()
+                            if markdown_text and markdown_text.strip():
+                                # Save the markdown text
+                                markdown_path = os.path.join(debug_dir, "document_markdown.md")
+                                with open(markdown_path, 'w', encoding='utf-8') as f:
+                                    f.write(markdown_text)
+                                print(f"Saved markdown text: {len(markdown_text)} chars")
+                                
+                                # Split into chunks
+                                chunks = text_splitter.split_text(markdown_text)
+                                for chunk_idx, chunk in enumerate(chunks):
+                                    text_file_name = f"{base_dir}/text/markdown_chunk_{chunk_idx:03d}.txt"
+                                    with open(text_file_name, 'w', encoding='utf-8') as f:
+                                        f.write(chunk)
+                                    
+                                    # Add to items list
+                                    items.append({
+                                        "page": 0,  # Assign to first page
+                                        "type": "text",
+                                        "text": chunk,
+                                        "path": text_file_name
+                                    })
+                    except Exception as e:
+                        print(f"Error using document.export_to_markdown(): {str(e)}")
+                
+                # Method 7: Try get all document.texts as a fallback
+                if not items and hasattr(document, 'texts') and document.texts:
+                    try:
+                        # Process all text elements in the document
+                        for text_idx, text_item in enumerate(document.texts):
+                            if hasattr(text_item, 'text') and text_item.text and text_item.text.strip():
+                                # Get page number if available
+                                page_num = getattr(text_item, 'page_number', 0) if hasattr(text_item, 'page_number') else 0
+                                
+                                # Save to file
+                                text_file_name = f"{base_dir}/text/text_item_{text_idx:03d}.txt"
+                                with open(text_file_name, 'w', encoding='utf-8') as f:
+                                    f.write(text_item.text)
+                                
+                                # Add to items
+                                items.append({
+                                    "page": page_num,
+                                    "type": "text",
+                                    "text": text_item.text,
+                                    "path": text_file_name
+                                })
+                        print(f"Processed {len(document.texts)} text items from document.texts")
+                    except Exception as e:
+                        print(f"Error processing document.texts: {str(e)}")
+                        
+                # If all else fails, try to get document.text attribute directly
+                if not items and hasattr(document, 'text') and document.text and document.text.strip():
+                    # Save the full document text
+                    full_text_path = os.path.join(base_dir, "text", "full_document.txt")
+                    with open(full_text_path, 'w', encoding='utf-8') as f:
+                        f.write(document.text)
+                        print(f"Saved document.text: {len(document.text)} chars")
+                    
+                    # Split into chunks
+                    chunks = text_splitter.split_text(document.text)
+                    for chunk_idx, chunk in enumerate(chunks):
+                        text_file_name = f"{base_dir}/text/document_chunk_{chunk_idx:03d}.txt"
+                        with open(text_file_name, 'w', encoding='utf-8') as f:
+                            f.write(chunk)
+                        
+                        # Add to items list
+                        items.append({
+                            "page": 0,  # Assign to first page as we don't know the page number
+                            "type": "text",
+                            "text": chunk,
+                            "path": text_file_name
+                        })
+                        
+            # If we have pages in the document, save a structure file
+            if hasattr(doc, 'document') and hasattr(doc.document, 'pages'):
+                structure_path = os.path.join(debug_dir, "document_structure.json")
+                try:
+                    structure = {"num_pages": len(doc.document.pages)}
+                    with open(structure_path, 'w', encoding='utf-8') as f:
+                        json.dump(structure, f, indent=2)
+                except Exception as e:
+                    print(f"Error saving document structure: {str(e)}")
+        except Exception as e:
+            print(f"Error using docling Python API: {str(e)}")
+            raise RuntimeError(f"Docling Python API processing failed: {str(e)}")
         
         # Import pymupdf to get basic metadata as a fallback
         import pymupdf
@@ -135,21 +373,6 @@ def process_pdf_with_docling(file: UploadFile) -> Dict[str, Any]:
             chunk_overlap=300,
             length_function=len,
             # More sophisticated separator list that preserves document structure
-            separators=[
-                "\n# ", "\n## ", "\n### ",  # Markdown-style headers
-                "\nChapter ", "\nSection ",  # Common document divisions
-                "\n\n", "\n",  # Paragraph breaks
-                ".", "!", "?",  # Sentence boundaries
-                ",", ";", ":",  # Clause boundaries
-                " ", ""  # Word boundaries as last resort
-            ]
-        )
-        
-        # Initialize text splitter
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1500,
-            chunk_overlap=300,
-            length_function=len,
             separators=[
                 "\n# ", "\n## ", "\n### ",  # Markdown-style headers
                 "\nChapter ", "\nSection ",  # Common document divisions
@@ -247,7 +470,7 @@ def process_pdf_with_docling(file: UploadFile) -> Dict[str, Any]:
                         
                         # Extract the page number from the table if available
                         page_number = i // 2  # Rough estimate of page number
-                        
+                            
                         # Create more detailed table metadata
                         table_metadata = {
                             "rows": len(table),
@@ -255,7 +478,43 @@ def process_pdf_with_docling(file: UploadFile) -> Dict[str, Any]:
                             "estimated_page": page_number,
                             "column_names": table.columns.tolist()
                         }
-                        
+                            
+                        # Save the document structure to a debug file
+                        try:
+                            doc_structure_path = os.path.join(debug_dir, "document_structure.json")
+                                
+                            # Basic structure information
+                            doc_structure = {
+                                "num_pages": document.num_pages if hasattr(document, 'num_pages') else 0,
+                                "num_text_elements": len(document.texts) if hasattr(document, 'texts') else 0,
+                                "num_tables": len(document.tables) if hasattr(document, 'tables') else 0,
+                                "num_images": len(document.pictures) if hasattr(document, 'pictures') else 0
+                            }
+                                
+                            # Add safely serializable properties to fix JSON serialization error
+                            if hasattr(document, '__dir__'):
+                                safe_props = {}
+                                for k in dir(document):
+                                    if not k.startswith('_'):
+                                        try:
+                                            attr_value = getattr(document, k)
+                                            # Skip methods and non-serializable objects
+                                            if not callable(attr_value):
+                                                # Convert non-basic types to string
+                                                if not isinstance(attr_value, (str, int, float, bool, list, dict, type(None))):
+                                                    safe_props[k] = str(attr_value)
+                                                else:
+                                                    safe_props[k] = attr_value
+                                        except Exception:
+                                            # Skip properties that can't be accessed or serialized
+                                            pass
+                                doc_structure['properties'] = safe_props
+                            
+                            with open(doc_structure_path, 'w', encoding='utf-8') as f:
+                                json.dump(doc_structure, f, indent=2)
+                        except Exception as struct_err:
+                            print(f"Error saving document structure: {str(struct_err)}")
+                            
                         items.append({
                             "page": page_number,
                             "type": "table",
@@ -266,7 +525,7 @@ def process_pdf_with_docling(file: UploadFile) -> Dict[str, Any]:
                         print(f"Error processing table {i}: {str(e)}")
         except Exception as e:
             print(f"Error with table extraction: {str(e)}")
-            
+                
         # Return the processed results
         return {
             "file_location": file_location,
@@ -280,89 +539,15 @@ def process_pdf_with_docling(file: UploadFile) -> Dict[str, Any]:
     except Exception as e:
         print(f"Error in docling processing: {str(e)}")
         
-        # If docling processing fails, fall back to PyMuPDF-based processing
-        try:
-            print("Falling back to PyMuPDF-based processing...")
-            import pymupdf
-            doc = pymupdf.open(file_location)
-            
-            # Get the number of pages
-            num_pages = doc.page_count if hasattr(doc, 'page_count') else len(doc)
-            
-            # Basic metadata extraction
-            doc_metadata = {
-                "title": doc.metadata.get("title", "") if hasattr(doc, "metadata") else "",
-                "author": doc.metadata.get("author", "") if hasattr(doc, "metadata") else "",
-                "creation_date": str(doc.metadata.get("creationDate", "")) if hasattr(doc, "metadata") else "",
-                "num_pages": num_pages,
-                "format": "PDF",
-                "producer": doc.metadata.get("producer", "") if hasattr(doc, "metadata") else "",
-                "fallback_processing": True  # Indicate this used fallback processing
-            }
-            
-            # Create text splitter for processing
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=1500,
-                chunk_overlap=300,
-                length_function=len,
-                separators=[
-                    "\n# ", "\n## ", "\n### ",  # Markdown-style headers
-                    "\nChapter ", "\nSection ",  # Common document divisions
-                    "\n\n", "\n",  # Paragraph breaks
-                    ".", "!", "?",  # Sentence boundaries
-                    ",", ";", ":",  # Clause boundaries
-                    " ", ""  # Word boundaries as last resort
-                ]
-            )
-            
-            # Save metadata
-            with open(metadata_path, 'w') as f:
-                json.dump(doc_metadata, f, indent=2)
-                
-            # Process each page using PyMuPDF
-            for page_idx in range(num_pages):
-                page = doc[page_idx]
-                
-                # Extract text with potential heading detection
-                text = page.get_text() if callable(page.get_text) else ""
-                
-                # Try to detect headings and structure in the text
-                try:
-                    process_enhanced_text(text, page_idx, base_dir, items, file_location, text_splitter)
-                except Exception as text_err:
-                    print(f"Error processing text on page {page_idx}: {str(text_err)}")
-                    # Create a simple chunk without structure detection
-                    if text:
-                        text_file_path = os.path.join(base_dir, "text", f"page_{page_idx}.txt")
-                        with open(text_file_path, 'w') as f:
-                            f.write(text)
-                        items.append({
-                            "page": page_idx,
-                            "type": "text",
-                            "text": text,
-                            "path": text_file_path,
-                            "snippet": text[:200] + ('...' if len(text) > 200 else '')
-                        })
-                
-            # Return processed results
-            return {
-                "file_location": file_location,
-                "filename": file.filename,
-                "items": items,
-                "num_pages": doc_metadata["num_pages"],
-                "size_bytes": os.path.getsize(file_location) if os.path.exists(file_location) else None,
-                "metadata": doc_metadata,
-                "used_fallback": True
-            }
-        except Exception as fallback_error:
-            print(f"Fallback processing also failed: {str(fallback_error)}")
-            return {
-                "file_location": file_location if 'file_location' in locals() else None,
-                "filename": file.filename,
-                "items": items if 'items' in locals() else [],
-                "error": f"Docling error: {str(e)}. Fallback error: {str(fallback_error)}",
-                "size_bytes": os.path.getsize(file_location) if 'file_location' in locals() and os.path.exists(file_location) else None
-            }
+        # For testing purposes, do not fall back to PyMuPDF
+        print("NOT falling back to PyMuPDF as requested for testing")
+        return {
+            "file_location": file_location if 'file_location' in locals() else None,
+            "filename": file.filename,
+            "items": items if 'items' in locals() else [],
+            "error": f"Docling error: {str(e)}",
+            "size_bytes": os.path.getsize(file_location) if 'file_location' in locals() and os.path.exists(file_location) else None
+        }
 
 def process_enhanced_text(
     text: str,
