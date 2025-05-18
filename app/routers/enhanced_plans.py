@@ -132,6 +132,7 @@ async def upload_enhanced_pdf(
         # Commit all changes to the database
         db.commit()
 
+        # Add document text chunks to vector store for semantic search
         try:
             upsert_text_chunks(
                 document_id=new_document.id,
@@ -144,8 +145,13 @@ async def upload_enhanced_pdf(
         try:
             # Extract text chunks to pass to the generator (to avoid double processing)
             text_chunks = [item for item in result["items"] if item.get("type") == "text"]
-            print(f'text_chunks: {text_chunks}')
-            # Generate the enhanced study plan and pass the already processed text chunks
+            image_chunks = [item for item in result["items"] if item.get("type") == "image"]
+            print(f'text_chunks count: {len(text_chunks)}')
+            print(f'image_chunks count: {len(image_chunks)}')
+            if image_chunks:
+                print(f'First image path: {image_chunks[0].get("path", "No path")}')
+            
+            # Generate the enhanced study plan
             try:
                 study_plan_id = generate_enhanced_study_plan(
                     document_id=new_document.id,
@@ -204,7 +210,7 @@ def get_text_chunks(document_id: str, db: Session = Depends(get_db)):
         # Get all text chunks for this document
         document_chunks = db.query(DocumentChunk).filter(
             DocumentChunk.document_id == document_id,
-            DocumentChunk.content_type == ContentTypeEnum.text  # Only get text chunks
+            # DocumentChunk.content_type == ContentTypeEnum.text  # Only get text chunks
         ).order_by(DocumentChunk.page_number, DocumentChunk.chunk_index).all()
         
         if not document_chunks:
@@ -225,7 +231,9 @@ def get_text_chunks(document_id: str, db: Session = Depends(get_db)):
                 "page": chunk.page_number,
                 "content": content[:200] + "..." if len(content) > 200 else content,
                 "length": len(content) if content else 0,
-                "token_count": chunk.token_count
+                "token_count": chunk.token_count,
+                "type": chunk.content_type.value,
+                "blob_url": chunk.blob_url,
             })
         
         return {

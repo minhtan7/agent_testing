@@ -30,43 +30,46 @@ print("NOTE: Docling is enabled by default for testing")
 
 def process_pdf(file: UploadFile, use_docling: bool = False) -> Dict[str, Any]:
     """
-    Process a PDF file to extract text, tables, and images.
+    Process a PDF file to extract text, tables, and images using docling.
     
     Args:
         file: The PDF file to process
-        use_docling: Whether to use the docling library for improved structure extraction
+        use_docling: Whether to use the docling library (kept for API compatibility)
         
     Returns:
         Dictionary containing processed items and metadata
     """
+    # Force docling to be enabled for testing
+    ENABLE_DOCLING = True
+    
+    if not DOCLING_AVAILABLE:
+        print("Docling is not available. Please check installation.")
+        # Return empty result but with a valid structure for API compatibility
+        return {
+            "file_location": "",
+            "filename": file.filename,
+            "items": [],
+            "num_pages": 0,
+            "size_bytes": 0,
+            "error": "Docling not available"
+        }
+    
+    print(f"Using docling for PDF processing")
     try:
-        # Only use docling if explicitly requested AND enabled in environment AND available
-        if use_docling and DOCLING_AVAILABLE and ENABLE_DOCLING:
-            try:
-                print(f"Using docling for PDF processing")
-                result = process_pdf_with_docling(file)
-                
-                # Check if docling used fallback (PyMuPDF) internally
-                if result.get('used_fallback'):
-                    print("Note: Docling used internal PyMuPDF fallback for processing")
-                return result
-            except Exception as e:
-                print(f"Docling processing failed: {str(e)}")
-                print(f"Falling back to standard PDF processing")
-        else:
-            if not ENABLE_DOCLING:
-                print("Docling is disabled. Set ENABLE_DOCLING=True to enable it.")
-            elif not DOCLING_AVAILABLE:
-                print("Docling not available, using standard processing")
-            elif not use_docling:
-                print("Standard processing requested")
+        result = process_pdf_with_docling(file)
+        print(f"Docling processing completed with {len(result.get('items', []))} items")
+        return result
     except Exception as e:
-        print(f"Error using docling: {str(e)}. Falling back to standard processing.")
-        # Fall back to standard processing if docling fails
-        return process_pdf_with_pymupdf(file)
-    else:
-        # Use standard PyMuPDF-based processing
-        return process_pdf_with_pymupdf(file)
+        print(f"Docling processing failed: {str(e)}")
+        # Return error information but with a valid structure
+        return {
+            "file_location": "",
+            "filename": file.filename,
+            "items": [],
+            "num_pages": 0,
+            "size_bytes": 0,
+            "error": f"Docling processing failed: {str(e)}"
+        }
 
 
 def process_pdf_with_pymupdf(file: UploadFile) -> Dict[str, Any]:

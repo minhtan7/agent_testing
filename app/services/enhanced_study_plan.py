@@ -5,6 +5,7 @@ Implements the improved RAG pipeline for generating structured study plans.
 
 import uuid
 import json
+import os
 from typing import List, Dict, Any, Optional, Tuple
 
 from sqlalchemy.orm import Session
@@ -71,11 +72,13 @@ def generate_enhanced_study_plan(
     # If text_chunks are provided, use them directly (avoids double processing)
     if text_chunks:
         for chunk in text_chunks:
-            if chunk.get("type") == "text" and chunk.get("text"):
+            if isinstance(chunk, dict) and chunk.get("type") == "text" and chunk.get("text"):
+                # Safely get page number with a default of 0
+                page = chunk.get("page", 0)
                 doc = LangchainDocument(
                     page_content=chunk["text"],
                     metadata={
-                        "page": chunk["page"],
+                        "page": page,
                         "source": document.storage_url
                     }
                 )
@@ -84,9 +87,12 @@ def generate_enhanced_study_plan(
         # Otherwise, try to parse the document from storage
         file_path = document.storage_url
         try:
-            structured_docs = parse_pdf_hierarchically(file_path)
-            if not structured_docs:
-                print(f"Warning: Hierarchical parsing returned no documents for {document_id}")
+            if not file_path or not os.path.exists(file_path):
+                print(f"Warning: File path does not exist: {file_path}")
+            else:
+                structured_docs = parse_pdf_hierarchically(file_path)
+                if not structured_docs:
+                    print(f"Warning: Hierarchical parsing returned no documents for {document_id}")
         except Exception as e:
             print(f"Error parsing document hierarchically: {str(e)}")
     
@@ -166,6 +172,9 @@ def _generate_plan_with_critique(
     Returns:
         Final study plan checklist
     """
+    # Handle case where outline is empty or too short
+    if not outline or len(outline.strip()) < 20:
+        outline = "No document content was successfully extracted. This document may contain primarily images or non-textual content."
     # Format the familiarity and goal text
     familiarity_text = familiarity or "The student has no prior familiarity with this subject"
     goal_text = goal or "Master the material effectively and efficiently"
@@ -237,7 +246,10 @@ Generate a personalized study plan formatted as a numbered checklist.
     }
     
     # Use invoke instead of predict (to fix deprecation warning)
-    current_plan = llm.invoke(plan_prompt.format(**inputs))
+    response = llm.invoke(plan_prompt.format(**inputs))
+    # Extract the content from the response object
+    current_plan_content = response.content
+    print(f"Generated initial plan with {len(current_plan_content)} characters")
     
     # Self-critique loop
     for attempt in range(max_retries):
@@ -245,23 +257,23 @@ Generate a personalized study plan formatted as a numbered checklist.
         critique = None
         
         # Validate the current plan
-        is_valid, error = validate_checklist(current_plan)
+        is_valid, error = validate_checklist(current_plan_content)
         if is_valid:
             # Plan passes validation, check with LLM critic
-            critique = critique_checklist(current_plan)
+            critique = critique_checklist(current_plan_content)
             if critique == "OK":
                 # Both validations pass
-                return current_plan
+                return current_plan_content
         
         # If we got here, validation failed - get LLM critique
         if not critique:
-            critique = critique_checklist(current_plan)
+            critique = critique_checklist(current_plan_content)
         
         # Revise the plan
         revision_prompt = ChatPromptTemplate.from_messages([
             ("system", system_msg),
             ("human", human_msg),
-            ("assistant", current_plan),
+            ("assistant", current_plan_content),
             ("human", f"""Your checklist needs revision based on these issues:
 {critique if critique != "OK" else error}
 
@@ -269,10 +281,12 @@ Please provide a revised checklist that addresses these issues.""")
         ])
         
         # Generate revised plan (use invoke instead of predict)
-        current_plan = llm.invoke(revision_prompt.format(**inputs))
+        response = llm.invoke(revision_prompt.format(**inputs))
+        current_plan_content = response.content
+        print(f"Generated revised plan (attempt {attempt+1}) with {len(current_plan_content)} characters")
     
     # Return best plan we have, even if it didn't pass all validations
-    return current_plan
+    return current_plan_content
 
 def _create_structured_plan(checklist_text: str) -> Dict[str, Any]:
     """

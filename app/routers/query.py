@@ -26,7 +26,7 @@ class QueryRequest(BaseModel):
     top_k: int = 10  # Increased default number of results to return
 
 class QueryResponse(BaseModel):
-    answer: str
+    # answer: Optional[str]
     sources: List[Dict[str, Any]]
 
 @router.post("/query", response_model=QueryResponse)
@@ -119,28 +119,28 @@ async def query_documents(request: QueryRequest, db: Session = Depends(get_db)):
         # If no relevant context found
         if not contexts:
             return QueryResponse(
-                answer="I couldn't find any relevant information to answer your query.",
+                # answer="I couldn't find any relevant information to answer your query.",
                 sources=[]
             )
         
         # Generate answer using the LLM service
         llm_start = time.time()
-        answer = get_answer_from_llm(
-            query=request.query,
-            contexts=contexts,
-            document_id=request.document_id 
-        )
-        llm_time = time.time() - llm_start
-        print(f"[TIMING] LLM answer generation time: {llm_time:.4f} seconds")
+        # answer = get_answer_from_llm(
+        #     query=request.query,
+        #     contexts=contexts,
+        #     document_id=request.document_id 
+        # )
+        # llm_time = time.time() - llm_start
+        # print(f"[TIMING] LLM answer generation time: {llm_time:.4f} seconds")
         
-        # Calculate total time
-        total_time = time.time() - start_time_total
-        print(f"[TIMING] Total query processing time: {total_time:.4f} seconds")
-        print(f"[TIMING] Summary: Embedding={embedding_time:.4f}s, Vector Search={vector_search_time:.4f}s, LLM={llm_time:.4f}s")
+        # # Calculate total time
+        # total_time = time.time() - start_time_total
+        # print(f"[TIMING] Total query processing time: {total_time:.4f} seconds")
+        # print(f"[TIMING] Summary: Embedding={embedding_time:.4f}s, Vector Search={vector_search_time:.4f}s, LLM={llm_time:.4f}s")
         
         return QueryResponse(
             sources=contexts,
-            answer=answer
+            # answer=answer
         )
         
     except Exception as e:

@@ -53,17 +53,25 @@ def parse_pdf_hierarchically(file_path: str, chunk_size: int = 4000) -> List[Lan
         
         # Convert the result to LangchainDocument objects
         docs = []
-        for item in result["items"]:
-            if item.get("type") == "text" and item.get("text"):
-                # Create a document with page number as metadata
-                doc = LangchainDocument(
-                    page_content=item["text"],
-                    metadata={
-                        "page": item["page"],
-                        "source": file_path
-                    }
-                )
-                docs.append(doc)
+        
+        # First check if result is not None and contains items
+        if result and isinstance(result, dict) and "items" in result and result["items"]:
+            for item in result["items"]:
+                # Verify each item has the expected structure before accessing
+                if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
+                    # Check if page exists, default to 0 if not
+                    page = item.get("page", 0)
+                    # Create a document with page number as metadata
+                    doc = LangchainDocument(
+                        page_content=item["text"],
+                        metadata={
+                            "page": page,
+                            "source": file_path
+                        }
+                    )
+                    docs.append(doc)
+        else:
+            print(f"Warning: PDF processing result doesn't contain valid items structure for {file_path}")
                 
         # Apply improved chunking to better preserve structure
         if docs:

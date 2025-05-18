@@ -6,25 +6,35 @@ This provides improved structure preservation and metadata extraction from PDFs.
 import os
 import base64
 import re
+import datetime
 from typing import List, Dict, Any, Optional
 from fastapi import UploadFile
 import tempfile
 import json
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from app.models.upload import FileID
 
 # Import docling and related packages
 import docling
 import docling_core
 import docling_parse
-from app.models.upload import FileID
 
-# Import our custom helper for direct text processing
+# Import our custom helpers for PDF processing
 try:
     from app.utils.direct_text_processor import process_text_elements_directly
 except ImportError:
     # Define fallback if import fails
     def process_text_elements_directly(document, base_dir, file_location, items):
         print("Direct text processor not available")
+        return 0
+        
+# Import image extraction helper
+try:
+    from app.utils.docling_image_extractor import extract_images_with_docling
+except ImportError:
+    # Define fallback if image extractor is not available
+    def extract_images_with_docling(file_location, base_dir, items):
+        print("Image extraction module not available")
         return 0
 
 def create_directories(base_dir: str) -> None:
@@ -144,6 +154,19 @@ def process_pdf_with_docling(file: UploadFile) -> Dict[str, Any]:
                 except Exception as e:
                     print(f"Could not save raw document text: {str(e)}")
                     
+                # Extract images using our improved method
+                print("Extracting images using the improved docling image extractor...")
+                # Get document_id from the base_dir path (eg: ./uploads/123 -> 123)
+                doc_id = os.path.basename(base_dir)
+                
+                # Create document-specific image directory
+                doc_image_dir = os.path.join(base_dir, "images")
+                os.makedirs(doc_image_dir, exist_ok=True)
+                
+                # Use the new approach that properly loads images during PDF conversion
+                image_count = extract_images_with_docling(file_location, base_dir, items)
+                print(f"Extracted {image_count} images from document")
+                    
                 # Extract and process pages - this is where we'll get our text from
                 if hasattr(document, 'pages') and document.pages:
                     print(f"Document has {len(document.pages)} pages")
@@ -154,13 +177,11 @@ def process_pdf_with_docling(file: UploadFile) -> Dict[str, Any]:
                         page_text = ""
                         
                         # Try to extract text using different methods
-                        # Method 1: Use document's export_to_text method for the page
-                        try:
-                            if hasattr(document, 'export_to_text'):
-                                page_text = document.export_to_text(page_range=(page_idx, page_idx+1))
-                                print(f"Got text from export_to_text: {len(page_text)} chars")
-                        except Exception as e:
-                            print(f"Error using export_to_text: {str(e)}")
+                        # Document's export_to_text doesn't accept page_range parameter
+                        # Try to get text from the page directly
+                        if hasattr(page, 'text') and isinstance(page.text, str):
+                            page_text = page.text
+                            print(f"Got text from page.text: {len(page_text)} chars")
                         
                         # Method 2: Check if page has texts attribute
                         if not page_text and hasattr(page, 'texts') and page.texts:
@@ -227,6 +248,23 @@ def process_pdf_with_docling(file: UploadFile) -> Dict[str, Any]:
                                 
                 # Try methods available from full document object
                 # Method 5: Try export_to_text method for the whole document
+                
+                # Initialize text_splitter here to ensure it's available in all code paths
+                text_splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=1500,
+                    chunk_overlap=300,
+                    length_function=len,
+                    # More sophisticated separator list that preserves document structure
+                    separators=[
+                        "\n# ", "\n## ", "\n### ",  # Markdown-style headers
+                        "\nChapter ", "\nSection ",  # Common document divisions
+                        "\n\n", "\n",  # Paragraph breaks
+                        ".", "!", "?",  # Sentence boundaries
+                        ",", ";", ":",  # Clause boundaries
+                        " ", ""  # Word boundaries as last resort
+                    ]
+                )
+                
                 try:
                     if hasattr(document, 'export_to_text'):
                         full_text = document.export_to_text()
@@ -236,7 +274,7 @@ def process_pdf_with_docling(file: UploadFile) -> Dict[str, Any]:
                             with open(full_text_path, 'w', encoding='utf-8') as f:
                                 f.write(full_text)
                             print(f"Saved full document text: {len(full_text)} chars")
-                            
+                                
                             # Split into chunks
                             chunks = text_splitter.split_text(full_text)
                             for chunk_idx, chunk in enumerate(chunks):
@@ -325,26 +363,41 @@ def process_pdf_with_docling(file: UploadFile) -> Dict[str, Any]:
                         
                         # Add to items list
                         items.append({
-                            "page": 0,  # Assign to first page as we don't know the page number
+                            "page": 0,  # Assign to first page
                             "type": "text",
                             "text": chunk,
                             "path": text_file_name
                         })
-                        
-            # If we have pages in the document, save a structure file
-            if hasattr(doc, 'document') and hasattr(doc.document, 'pages'):
-                structure_path = os.path.join(debug_dir, "document_structure.json")
-                try:
-                    structure = {"num_pages": len(doc.document.pages)}
-                    with open(structure_path, 'w', encoding='utf-8') as f:
-                        json.dump(structure, f, indent=2)
-                except Exception as e:
-                    print(f"Error saving document structure: {str(e)}")
         except Exception as e:
             print(f"Error using docling Python API: {str(e)}")
             raise RuntimeError(f"Docling Python API processing failed: {str(e)}")
+    
+        # Method 7: Try get all document.texts as a fallback
+        if not items and hasattr(document, 'texts') and document.texts:
+            try:
+                # Process all text elements in the document
+                for text_idx, text_item in enumerate(document.texts):
+                    if hasattr(text_item, 'text') and text_item.text and text_item.text.strip():
+                        # Get page number if available
+                        page_num = getattr(text_item, 'page_number', 0) if hasattr(text_item, 'page_number') else 0
+                        
+                        # Save to file
+                        text_file_name = f"{base_dir}/text/text_item_{text_idx:03d}.txt"
+                        with open(text_file_name, 'w', encoding='utf-8') as f:
+                            f.write(text_item.text)
+                        
+                        # Add to items
+                        items.append({
+                            "page": page_num,
+                            "type": "text",
+                            "text": text_item.text,
+                            "path": text_file_name
+                        })
+                print(f"Processed {len(document.texts)} text items from document.texts")
+            except Exception as e:
+                print(f"Error processing document.texts: {str(e)}")
         
-        # Import pymupdf to get basic metadata as a fallback
+        # Prepare metadata from docling output
         import pymupdf
         pdf_doc = pymupdf.open(file_location)
         num_pages = pdf_doc.page_count if hasattr(pdf_doc, 'page_count') else len(pdf_doc)
@@ -454,7 +507,7 @@ def process_pdf_with_docling(file: UploadFile) -> Dict[str, Any]:
                                 "columns": len(table_data[0]) if table_data and len(table_data) > 0 else 0
                             }
                         })
-            
+                
         # Try to process tables with docling approach
         try:
             from tabula import read_pdf
@@ -479,42 +532,7 @@ def process_pdf_with_docling(file: UploadFile) -> Dict[str, Any]:
                             "column_names": table.columns.tolist()
                         }
                             
-                        # Save the document structure to a debug file
-                        try:
-                            doc_structure_path = os.path.join(debug_dir, "document_structure.json")
-                                
-                            # Basic structure information
-                            doc_structure = {
-                                "num_pages": document.num_pages if hasattr(document, 'num_pages') else 0,
-                                "num_text_elements": len(document.texts) if hasattr(document, 'texts') else 0,
-                                "num_tables": len(document.tables) if hasattr(document, 'tables') else 0,
-                                "num_images": len(document.pictures) if hasattr(document, 'pictures') else 0
-                            }
-                                
-                            # Add safely serializable properties to fix JSON serialization error
-                            if hasattr(document, '__dir__'):
-                                safe_props = {}
-                                for k in dir(document):
-                                    if not k.startswith('_'):
-                                        try:
-                                            attr_value = getattr(document, k)
-                                            # Skip methods and non-serializable objects
-                                            if not callable(attr_value):
-                                                # Convert non-basic types to string
-                                                if not isinstance(attr_value, (str, int, float, bool, list, dict, type(None))):
-                                                    safe_props[k] = str(attr_value)
-                                                else:
-                                                    safe_props[k] = attr_value
-                                        except Exception:
-                                            # Skip properties that can't be accessed or serialized
-                                            pass
-                                doc_structure['properties'] = safe_props
-                            
-                            with open(doc_structure_path, 'w', encoding='utf-8') as f:
-                                json.dump(doc_structure, f, indent=2)
-                        except Exception as struct_err:
-                            print(f"Error saving document structure: {str(struct_err)}")
-                            
+                        # Add the table to our items list
                         items.append({
                             "page": page_number,
                             "type": "table",
@@ -524,18 +542,72 @@ def process_pdf_with_docling(file: UploadFile) -> Dict[str, Any]:
                     except Exception as e:
                         print(f"Error processing table {i}: {str(e)}")
         except Exception as e:
-            print(f"Error with table extraction: {str(e)}")
+            print(f"Error using tabula for table extraction: {str(e)}")
+        
+        # Save the document structure to a debug file if we have a document object
+        if 'document' in locals() or 'document' in globals():
+            try:
+                doc_structure_path = os.path.join(debug_dir, "document_structure.json")
                 
-        # Return the processed results
-        return {
-            "file_location": file_location,
-            "filename": file.filename,
-            "items": items,
-            "num_pages": doc_metadata["num_pages"],
-            "size_bytes": os.path.getsize(file_location) if os.path.exists(file_location) else None,
-            "metadata": doc_metadata
-        }
-    
+                # Helper function to safely handle callable attributes
+                def _safe(val):
+                    if callable(val):
+                        try:
+                            return val()  # call zero-arg methods
+                        except TypeError:
+                            return str(val)  # fall back to string representation
+                    return val
+                
+                # Basic structure information
+                doc_structure = {
+                    "num_pages": _safe(getattr(document, "num_pages", 0)),
+                    "num_text_elements": len(document.texts) if hasattr(document, 'texts') else 0,
+                    "num_tables": len(document.tables) if hasattr(document, 'tables') else 0,
+                    "num_images": len(document.pictures) if hasattr(document, 'pictures') else 0,
+                    "timestamp": str(datetime.datetime.now()),
+                    "docling_version": getattr(docling, "__version__", "unknown")
+                }
+                
+                # Instead of trying to access all properties, create a safe subset
+                safe_props = {}
+                
+                # Only examine a safe list of properties we know should be serializable
+                safe_property_names = [
+                    "title", "author", "creator", "subject", "keywords",
+                    "producer", "created", "modified", "format", "language"
+                ]
+                
+                for prop_name in safe_property_names:
+                    if hasattr(document, prop_name):
+                        try:
+                            value = getattr(document, prop_name)
+                            # Skip callable objects and private attributes
+                            if not callable(value) and not isinstance(value, type):
+                                # Convert non-basic types to string representation
+                                if not isinstance(value, (str, int, float, bool, list, dict, type(None))):
+                                    safe_props[prop_name] = str(value)
+                                else:
+                                    safe_props[prop_name] = value
+                        except Exception:
+                            # Skip properties that can't be accessed or serialized
+                            pass
+                                
+                doc_structure['properties'] = safe_props
+                
+                with open(doc_structure_path, 'w', encoding='utf-8') as f:
+                    json.dump(doc_structure, f, indent=2, default=str)
+            except Exception as struct_err:
+                print(f"Error saving document structure: {str(struct_err)}")
+                
+            # Return the processed results
+            return {
+                "file_location": file_location,
+                "filename": file.filename,
+                "items": items,
+                "num_pages": doc_metadata["num_pages"],
+                "size_bytes": os.path.getsize(file_location) if os.path.exists(file_location) else None,
+                "metadata": doc_metadata
+            }
     except Exception as e:
         print(f"Error in docling processing: {str(e)}")
         

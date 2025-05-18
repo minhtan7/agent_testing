@@ -44,7 +44,15 @@ def generate_study_plan(
 ) -> uuid.UUID:
     """Generate a study plan from PDF chunks and persist it."""
 
-    # 0️⃣ Convert chunks → LangChain documents
+    # Print information about chunks and images for debugging
+    print(f"Processing document with {len(text_chunks)} chunks, including {len([chunk for chunk in text_chunks if chunk.get('type') == 'image'])} images")
+    
+    # Print details about any images found
+    image_chunks = [chunk for chunk in text_chunks if chunk.get('type') == 'image']
+    for i, image in enumerate(image_chunks):
+        print(f"Image {i+1}: {image.get('path')}")
+    
+    # 0️⃣ Convert chunks → LangChain documents
     docs: List[LangchainDocument] = []
     for chunk in text_chunks:
         if chunk.get("type") == "text" and chunk.get("text"):
@@ -58,14 +66,14 @@ def generate_study_plan(
     if not docs:
         raise ValueError("No text content found in the document")
 
-    # 1️⃣ Initialise LLM
+    # 1️⃣ Initialise LLM
     openai_api_key = os.getenv("OPENAI_API_KEY")
     if not openai_api_key:
         raise ValueError("OPENAI_API_KEY environment variable is not set")
 
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3, openai_api_key=openai_api_key)
 
-    # 2️⃣ Summarise via Map‑Reduce to get a compact outline
+    # 2️⃣ Summarise via Map‑Reduce to get a compact outline
     map_prompt = ChatPromptTemplate.from_messages(
         [
            ("system", "You are an expert teacher summarising materials."),
@@ -92,6 +100,7 @@ def generate_study_plan(
 
     print(f"Outline: {outline}")
 
+    # Generate the full study plan using the OpenAI API
     # Strictly follow the PM's prompt format
     system_msg = (
         "### ROLE  \n"
@@ -178,10 +187,14 @@ def generate_study_plan(
     
     # Print the formatted prompt for debugging
     print("\n==== STUDY PLAN PROMPT ====")
-    print(plan_prompt.format(**inputs))
+    print("TESTING MODE - OpenAI API calls disabled")
     print("==== END OF PROMPT ====")
     
-    study_plan_result = (plan_prompt | llm).invoke(inputs).content  # <- Invoke with inputs
+    # study_plan_result = (plan_prompt | llm).invoke(inputs).content  # <- Invoke with inputs - COMMENTED OUT FOR TESTING
+    
+    # Print image count for testing
+    image_count = len([chunk for chunk in text_chunks if chunk.get("type") == "image"])
+    print(f"Testing mode: Found {image_count} images in document")
 
     # 4️⃣ Parse JSON (fallback to raw text)
     try:
